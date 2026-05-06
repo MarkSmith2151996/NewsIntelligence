@@ -6,26 +6,39 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
+
+
+EASTERN_TZ = ZoneInfo("America/New_York")
+
+
+def _parse_timestamp(timestamp: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=EASTERN_TZ)
+
+    return dt.astimezone(EASTERN_TZ)
 
 
 def session_bucket_from_timestamp(timestamp: str) -> str:
-    try:
-        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        hour = dt.hour
-    except ValueError:
+    dt = _parse_timestamp(timestamp)
+    if dt is None:
         return "unknown"
 
-    if hour < 9:
-        return "overnight"
-    if hour < 14:
-        return "premarket"
-    if hour < 21:
-        return "regular"
-    return "afterhours"
+    minute_of_day = (dt.hour * 60) + dt.minute
+    if minute_of_day < 570:
+        return "pre_open"
+    if minute_of_day < 990:
+        return "open"
+    return "post_close"
 
 
 def known_before_open(timestamp: str) -> bool:
-    return session_bucket_from_timestamp(timestamp) in {"overnight", "premarket"}
+    return session_bucket_from_timestamp(timestamp) == "pre_open"
 
 
 @dataclass
@@ -64,6 +77,7 @@ class DayEvent:
             "event_type": self.event_type,
             "sentiment": self.sentiment,
             "importance": self.importance,
+            "bucket": self.session_bucket,
             "session_bucket": self.session_bucket,
             "known_before_open": 1 if self.known_before_open else 0,
             "entities_json": json.dumps(self.entities),

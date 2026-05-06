@@ -19,6 +19,7 @@ from news_intelligence.day_memory import DayIntelligenceMemory
 LABEL_VERSION = "gross_per_contract_v1"
 SAMPLE_VERSION = "pilot10_v1"
 DEFAULT_SAMPLE_COUNTS = {"BAD": 4, "GOOD": 4, "NEUTRAL": 2}
+DEFAULT_STRATEGY_ID = "legacy_default"
 
 
 def load_25k_daily(csv_path: Path) -> pd.DataFrame:
@@ -78,7 +79,7 @@ def load_account_seed(csv_path: Path, account: str) -> pd.DataFrame:
     raise ValueError(f"Unsupported seed CSV format for {csv_path}")
 
 
-def build_label_rows(df_25k: pd.DataFrame) -> list[dict[str, object]]:
+def build_label_rows(df_25k: pd.DataFrame, strategy_id: str) -> list[dict[str, object]]:
     label_df = df_25k[["date", "contracts", "gross_pnl", "source_file"]].copy()
     label_df["label_metric_value"] = label_df["gross_pnl"] / label_df["contracts"]
     label_df = label_df.sort_values("label_metric_value").reset_index(drop=True)
@@ -95,6 +96,7 @@ def build_label_rows(df_25k: pd.DataFrame) -> list[dict[str, object]]:
 
     label_df["label"] = label_df["label_metric_value"].apply(assign_label)
     return [{
+        "strategy_id": strategy_id,
         "date": row.date,
         "label": row.label,
         "label_metric": "gross_pnl_per_contract",
@@ -116,7 +118,10 @@ def build_pilot_rows(label_rows: list[dict[str, object]], seed: int) -> list[dic
     pilot_rows = []
     for label, count in DEFAULT_SAMPLE_COUNTS.items():
         dates = list(label_to_dates[label])
-        for date in rng.sample(dates, count):
+        sample_size = min(count, len(dates))
+        if sample_size == 0:
+            continue
+        for date in rng.sample(dates, sample_size):
             pilot_rows.append({
                 "date": date,
                 "label": label,
@@ -129,9 +134,13 @@ def build_pilot_rows(label_rows: list[dict[str, object]], seed: int) -> list[dic
     return pilot_rows
 
 
-def dataframe_to_records(df: pd.DataFrame) -> list[dict[str, object]]:
+def dataframe_to_records(df: pd.DataFrame, strategy_id: str) -> list[dict[str, object]]:
     columns = ["date", "account", "contracts", "trade_count", "wins", "losses", "gross_pnl", "net_pnl", "avg_win", "avg_loss", "win_rate", "max_single_loss", "max_single_win", "killswitch_triggered", "day_result", "source_file", "source_type"]
-    return df[columns].to_dict("records")
+    records = df[columns].to_dict("records")
+    for record in records:
+        record["strategy_id"] = strategy_id
+        record["max_intraday_drawdown"] = None
+    return records
 
 
 def main() -> int:
@@ -140,18 +149,21 @@ def main() -> int:
     parser.add_argument("--file-25k", required=True, help="Path to the 25K seed CSV")
     parser.add_argument("--file-150k", required=True, help="Path to the 150K seed CSV")
     parser.add_argument("--sample-seed", type=int, default=42)
+    parser.add_argument("--strategy-id", default=DEFAULT_STRATEGY_ID, help="Strategy identifier for the seeded dataset")
     args = parser.parse_args()
 
     daily_25k = load_account_seed(Path(args.file_25k), account="25K")
     daily_150k = load_account_seed(Path(args.file_150k), account="150K")
     common_dates = sorted(set(daily_25k["date"]).intersection(set(daily_150k["date"])))
+    if not common_dates:
+        raise ValueError("No shared dates found between the 25K and 150K seed files")
     daily_25k = daily_25k[daily_25k["date"].isin(common_dates)].copy()
     daily_150k = daily_150k[daily_150k["date"].isin(common_dates)].copy()
     memory = DayIntelligenceMemory(db_path=args.db_path)
     memory.clear_seed_data()
-    memory.replace_trading_days(dataframe_to_records(daily_25k))
-    memory.replace_trading_days(dataframe_to_records(daily_150k))
-    label_rows = build_label_rows(daily_25k)
+    memory.replace_trading_days(dataframe_to_records(daily_25k, strategy_id=args.strategy_id))
+    memory.replace_trading_days(dataframe_to_records(daily_150k, strategy_id=args.strategy_id))
+    label_rows = build_label_rows(daily_25k, strategy_id=args.strategy_id)
     memory.replace_day_labels(label_rows)
     pilot_rows = build_pilot_rows(label_rows, seed=args.sample_seed)
     memory.replace_pilot_samples(pilot_rows)

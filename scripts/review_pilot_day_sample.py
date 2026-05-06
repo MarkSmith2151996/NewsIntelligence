@@ -8,6 +8,10 @@ import sqlite3
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DB_PATH = REPO_ROOT / "data" / "day_intelligence.db"
+
+
 def fetch_rows(conn: sqlite3.Connection, query: str, params: tuple = ()):
     cursor = conn.cursor()
     cursor.execute(query, params)
@@ -78,25 +82,29 @@ def print_macro_summary(conn: sqlite3.Connection, sample_group: str) -> None:
         print(f"  {label:<7} macro_events={macro_count}")
 
 
-def print_day_details(conn: sqlite3.Connection, sample_group: str, headlines_per_day: int) -> None:
+def print_day_details(conn: sqlite3.Connection, sample_group: str, strategy_id: str, headlines_per_day: int) -> None:
     day_rows = fetch_rows(conn, """
         SELECT p.date, p.label, dl.label_metric_value,
                td25.gross_pnl, td25.net_pnl, td25.trade_count,
                td150.net_pnl,
                COALESCE(ec.event_count, 0) AS event_count
         FROM pilot_samples p
-        LEFT JOIN day_labels dl ON dl.date = p.date
-        LEFT JOIN trading_days td25 ON td25.date = p.date AND td25.account = '25K'
-        LEFT JOIN trading_days td150 ON td150.date = p.date AND td150.account = '150K'
+        LEFT JOIN day_labels dl ON dl.date = p.date AND dl.strategy_id = ?
+        LEFT JOIN trading_days td25 ON td25.date = p.date AND td25.account = '25K' AND td25.strategy_id = ?
+        LEFT JOIN trading_days td150 ON td150.date = p.date AND td150.account = '150K' AND td150.strategy_id = ?
         LEFT JOIN (SELECT date, COUNT(*) AS event_count FROM day_events GROUP BY date) ec ON ec.date = p.date
         WHERE p.sample_group = ?
         ORDER BY p.date
-    """, (sample_group,))
+    """, (strategy_id, strategy_id, strategy_id, sample_group))
     print("\nDay Details")
     for date, label, metric_value, gross_25k, net_25k, trade_count, net_150k, event_count in day_rows:
-        print(f"\n{date}  {label}  metric={metric_value:.2f}  25K_gross={gross_25k:.2f}  25K_net={net_25k:.2f}  150K_net={net_150k:.2f}  trades={trade_count}  events={event_count}")
+        metric_text = f"{metric_value:.2f}" if metric_value is not None else "n/a"
+        gross_25k_text = f"{gross_25k:.2f}" if gross_25k is not None else "n/a"
+        net_25k_text = f"{net_25k:.2f}" if net_25k is not None else "n/a"
+        net_150k_text = f"{net_150k:.2f}" if net_150k is not None else "n/a"
+        print(f"\n{date}  {label}  metric={metric_text}  25K_gross={gross_25k_text}  25K_net={net_25k_text}  150K_net={net_150k_text}  trades={trade_count}  events={event_count}")
         headlines = fetch_rows(conn, """
-            SELECT provider, event_type, importance, session_bucket, title
+            SELECT provider, event_type, importance, COALESCE(bucket, session_bucket), title
             FROM day_events
             WHERE date = ?
             ORDER BY importance DESC, timestamp ASC, id ASC
@@ -108,19 +116,23 @@ def print_day_details(conn: sqlite3.Connection, sample_group: str, headlines_per
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Review pilot day sample from day intelligence DB")
-    parser.add_argument("--db-path", default="data/day_intelligence.db")
+    parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
     parser.add_argument("--sample-group", default="pilot_10")
+    parser.add_argument("--strategy-id", default="legacy_default")
     parser.add_argument("--headlines-per-day", type=int, default=5)
     args = parser.parse_args()
     db_path = Path(args.db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database file does not exist: {db_path}")
     conn = sqlite3.connect(db_path)
     print(f"Database: {db_path}")
     print(f"Sample group: {args.sample_group}")
+    print(f"Strategy: {args.strategy_id}")
     print_overall_summary(conn, args.sample_group)
     print_event_type_summary(conn, args.sample_group)
     print_provider_summary(conn, args.sample_group)
     print_macro_summary(conn, args.sample_group)
-    print_day_details(conn, args.sample_group, args.headlines_per_day)
+    print_day_details(conn, args.sample_group, args.strategy_id, args.headlines_per_day)
     return 0
 
 

@@ -8,6 +8,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from html import unescape
 from typing import Iterable, List, Sequence
 from xml.etree import ElementTree
@@ -132,7 +133,7 @@ class GDELTDayEventProvider(BaseHttpProvider, DayEventProvider):
     def _format_timestamp(self, seendate: str) -> str:
         try:
             dt = datetime.strptime(seendate, "%Y%m%dT%H%M%SZ")
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
+            return dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
         except ValueError:
             return seendate
 
@@ -283,9 +284,9 @@ class FedRssDayEventProvider(BaseHttpProvider, DayEventProvider):
 
     def _rss_pubdate_to_iso(self, value: str) -> str:
         try:
-            dt = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S %Z")
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
-        except ValueError:
+            dt = parsedate_to_datetime(value)
+            return dt.isoformat()
+        except (TypeError, ValueError):
             return value
 
     def _importance(self, title: str) -> float:
