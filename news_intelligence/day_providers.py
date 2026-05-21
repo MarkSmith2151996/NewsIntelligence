@@ -23,6 +23,25 @@ def _stable_event_id(prefix: str, *parts: str) -> str:
     return f"{prefix}_{hashlib.md5(payload.encode('utf-8')).hexdigest()[:16]}"
 
 
+def _repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _read_dotenv_value(key: str) -> str | None:
+    env_path = os.path.join(_repo_root(), ".env")
+    if not os.path.exists(env_path):
+        return None
+    with open(env_path, "r", encoding="utf-8") as env_file:
+        for line in env_file:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name, value = stripped.split("=", 1)
+            if name.strip() == key:
+                return value.strip().strip('"').strip("'")
+    return None
+
+
 class DayEventProvider(ABC):
     name: str = "provider"
 
@@ -457,6 +476,169 @@ class FedCalendarMacroProvider(BaseHttpProvider, MacroEventProvider):
         )]
 
 
+class FredMacroProvider(BaseHttpProvider, MacroEventProvider):
+    name = "fred"
+    BASE_URL = "https://api.stlouisfed.org/fred/"
+    START_DATE = "2019-01-01"
+    END_DATE = "2026-05-01"
+    SERIES = (
+        {
+            "series_id": "CPIAUCSL",
+            "event_type": "CPI",
+            "event_name": "CPI Release",
+            "release_id": "10",
+            "frequency": "Monthly",
+            "category": "INFLATION",
+            "scheduled_time": "08:30:00",
+            "importance": 1.0,
+        },
+        {
+            "series_id": "PAYEMS",
+            "event_type": "NFP",
+            "event_name": "Nonfarm Payrolls",
+            "release_id": "50",
+            "frequency": "Monthly",
+            "category": "EMPLOYMENT",
+            "scheduled_time": "08:30:00",
+            "importance": 1.0,
+        },
+        {
+            "series_id": "GDP",
+            "event_type": "GDP",
+            "event_name": "Gross Domestic Product",
+            "release_id": "53",
+            "frequency": "Quarterly",
+            "category": "GDP",
+            "scheduled_time": "08:30:00",
+            "importance": 0.8,
+        },
+        {
+            "series_id": "UNRATE",
+            "event_type": "UNRATE",
+            "event_name": "Unemployment Rate",
+            "release_id": "50",
+            "frequency": "Monthly",
+            "category": "EMPLOYMENT",
+            "scheduled_time": "08:30:00",
+            "importance": 0.7,
+        },
+        {
+            "series_id": "PPIFIS",
+            "event_type": "PPI",
+            "event_name": "PPI Release",
+            "release_id": "46",
+            "frequency": "Monthly",
+            "category": "INFLATION",
+            "scheduled_time": "08:30:00",
+            "importance": 0.8,
+        },
+        {
+            "series_id": "RSAFS",
+            "event_type": "RETAIL_SALES",
+            "event_name": "Retail Sales",
+            "release_id": "52",
+            "frequency": "Monthly",
+            "category": "CONSUMER",
+            "scheduled_time": "08:30:00",
+            "importance": 0.7,
+        },
+        {
+            "series_id": "ICSA",
+            "event_type": "JOBLESS_CLAIMS",
+            "event_name": "Initial Jobless Claims",
+            "release_id": "474",
+            "frequency": "Weekly",
+            "category": "EMPLOYMENT",
+            "scheduled_time": "08:30:00",
+            "importance": 0.5,
+        },
+        {
+            "series_id": "NAPM",
+            "event_type": "ISM",
+            "event_name": "ISM Manufacturing PMI",
+            "release_id": "29",
+            "frequency": "Monthly",
+            "category": "MANUFACTURING",
+            "scheduled_time": "10:00:00",
+            "importance": 0.7,
+        },
+        {
+            "series_id": "HOUST",
+            "event_type": "HOUSING_STARTS",
+            "event_name": "Housing Starts",
+            "release_id": "51",
+            "frequency": "Monthly",
+            "category": "HOUSING",
+            "scheduled_time": "08:30:00",
+            "importance": 0.5,
+        },
+        {
+            "series_id": "FEDFUNDS",
+            "event_type": "FEDFUNDS",
+            "event_name": "Fed Funds Rate",
+            "release_id": "18",
+            "frequency": "As decided",
+            "category": "MONETARY_POLICY",
+            "scheduled_time": "14:00:00",
+            "importance": 1.0,
+        },
+    )
+
+    def __init__(self, api_key: str | None = None):
+        super().__init__(min_interval_seconds=1.0, max_retries=2, retry_sleep_seconds=5.0)
+        self.api_key = api_key or os.environ.get("FRED_API_KEY") or _read_dotenv_value("FRED_API_KEY")
+        if not self.api_key:
+            raise EnvironmentError("Set FRED_API_KEY in the environment or NewsIntelligence .env")
+
+    def fetch_day_macro(self, date: str) -> List[MacroEvent]:
+        return [event for event in self.fetch_release_events(date, date) if event.date == date]
+
+    def fetch_release_events(self, start_date: str = START_DATE, end_date: str = END_DATE) -> List[MacroEvent]:
+        events: List[MacroEvent] = []
+        for series in self.SERIES:
+            try:
+                events.extend(self._fetch_series_release_events(series, start_date, end_date))
+            except Exception as exc:
+                print(f"fred {series['series_id']}: FAILED - {exc}")
+        return events
+
+    def _fetch_series_release_events(self, series: dict, start_date: str, end_date: str) -> List[MacroEvent]:
+        params = {
+            "release_id": series["release_id"],
+            "api_key": self.api_key,
+            "file_type": "json",
+            "include_release_dates_with_no_data": "false",
+            "realtime_start": start_date,
+            "realtime_end": end_date,
+        }
+        response = self._get(f"{self.BASE_URL}release/dates", params=params, timeout=45)
+        release_dates = response.json().get("release_dates", [])
+        events = []
+        for item in release_dates:
+            release_date = item.get("date", "")
+            if not release_date or release_date < start_date or release_date > end_date:
+                continue
+            events.append(MacroEvent(
+                event_id=_stable_event_id("fred", series["series_id"], release_date),
+                date=release_date,
+                timestamp=f"{release_date}T{series['scheduled_time']}",
+                provider=self.name,
+                event_name=series["event_name"],
+                category=series["category"],
+                scheduled_time=series["scheduled_time"],
+                importance=float(series["importance"]),
+                known_before_open=True,
+                raw_payload={
+                    "series_id": series["series_id"],
+                    "event_type": series["event_type"],
+                    "release_id": series["release_id"],
+                    "frequency": series["frequency"],
+                    "fred_release_date": item,
+                },
+            ))
+        return events
+
+
 def build_provider(name: str, max_records: int = 25) -> DayEventProvider | MacroEventProvider:
     normalized = name.strip().lower()
     if normalized == "gdelt":
@@ -471,7 +653,9 @@ def build_provider(name: str, max_records: int = 25) -> DayEventProvider | Macro
         return WikipediaCurrentEventsProvider(max_records=max_records)
     if normalized == "fed_calendar":
         return FedCalendarMacroProvider()
+    if normalized == "fred":
+        return FredMacroProvider()
     raise ValueError(f"Unknown provider: {name}")
 
 
-DEFAULT_FREE_PROVIDERS = ["fed_rss", "federal_register", "wikipedia", "gdelt"]
+DEFAULT_FREE_PROVIDERS = ["fed_rss", "federal_register", "wikipedia", "gdelt", "fred"]
